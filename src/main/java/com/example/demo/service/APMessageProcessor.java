@@ -245,9 +245,7 @@ public class APMessageProcessor {
                     /**************************************************************************************************/
                 }
                 else  { // 判定出井
-
-                    PersonInfo personInfo=AllPersonInformation.get(m.getPhoneMAC());
-                    String gonghao=personInfo.getGongHao();
+                    String gonghao=m.getGongHao();
                     // System.out.println(m.getPhoneMAC()+"出井"+": "+m.getGetTime());
 
 //                    try {
@@ -271,7 +269,7 @@ public class APMessageProcessor {
                     int attendance_id = attendanceDictionary.getOrDefault(m.getPhoneMAC(), 0);
                     if (attendance_id != 0) {
 
-                        dbo.updateAttendanceByGongHao(gonghao, m.getAPID(), m.getGetTime());
+                        dbo.updateAttendanceByGongHao(m.getGongHao(), m.getAPID(), m.getGetTime());
                         attendanceDictionary.put(m.getPhoneMAC(), 0);
 //                        ///*********************************开始
 //                        //redis更新
@@ -282,7 +280,7 @@ public class APMessageProcessor {
                     // 假如有超时记录，也要更新
                     int overtime_id = overtimeDictionary.getOrDefault(m.getPhoneMAC(), 0);
                     if (overtime_id != 0) {
-                        dbo.updateAlarmInfoByGongHao(gonghao, m.getGetTime());
+                        dbo.updateAlarmInfoByGongHao(m.getGongHao(), m.getGetTime());
                         overtimeDictionary.put(m.getPhoneMAC(), 0);
 //                        ///*********************************开始
 //                        RMap<String, Integer> overtimeRedisMap = redissonClient.getMap("overtimeDictionary");
@@ -336,8 +334,7 @@ public class APMessageProcessor {
                     // 1.从数据库查找该员工的最新下井记录，
                     // 如果不为当班次则插入一条新下井记录，否则将下井记录的出井时间和地点重新置为空
                     // 不再需要返回的 id 了
-                    PersonInfo personInfo=AllPersonInformation.get(m.getPhoneMAC());
-                    int id = dbo.insertAttendanceInfo(personInfo.getGongHao(),inAPMessage.getGetTime(), inAPMessage.getAPID());
+                    int id = dbo.insertAttendanceInfo(m.getGongHao(),inAPMessage.getGetTime(), inAPMessage.getAPID());
 
                     attendanceDictionary.put(m.getPhoneMAC(), id);
 
@@ -358,7 +355,7 @@ public class APMessageProcessor {
                     ///*********************************开始
                     RBlockingQueue<String> queue = redissonClient.getBlockingQueue("delayQueue");
                     RDelayedQueue<String> delayedQueue = redissonClient.getDelayedQueue(queue);// 获取一个延时队列，将普通队列包装成延时队列
-                    String task = m.getPhoneMAC();
+                    String task = m.getGongHao();
                     delayedQueue.offer(task, 10, TimeUnit.SECONDS);
                     ///************************************结束
 
