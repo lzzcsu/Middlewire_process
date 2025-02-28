@@ -16,7 +16,19 @@ public interface AttendanceMapper extends BaseMapper<TAttendance> {
     public int updateAttendanceInfoById(int id, String out_place, Date out_time);
 
 
-    @Update("UPDATE t_ap_attendance_info SET OUT_TIME = #{out_time} ,OUT_PLACE = #{out_place} WHERE GONG_HAO = #{gonghao}  ")
+    //@Update("UPDATE t_ap_attendance_info SET OUT_TIME = #{out_time} ,OUT_PLACE = #{out_place} WHERE GONG_HAO =  #{gonghao} ")
+    @Update("UPDATE t_ap_attendance_info " +
+            "SET OUT_TIME = #{out_time} , OUT_PLACE = #{out_place}  " +
+            "WHERE id = (" +
+            "    SELECT id " +
+            "    FROM (" +
+            "        SELECT id " +
+            "        FROM t_ap_attendance_info " +
+            "        WHERE GONG_HAO = #{gonghao} " +
+            "        ORDER BY id DESC " +
+            "        LIMIT 1" +
+            "    ) AS temp_table" +
+            ")")
     public int updateAttendanceInfoByGongHao(String gonghao, String out_place, Date out_time);
 
     @Insert("INSERT INTO t_ap_attendance_info  ( GONG_HAO, IN_TIME, IN_PLACE)  VALUES (  #{GONG_HAO}, #{IN_TIME}, #{IN_PLACE} )")

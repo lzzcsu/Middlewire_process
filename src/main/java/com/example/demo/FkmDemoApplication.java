@@ -9,12 +9,14 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 import java.util.List;
+import java.util.TimeZone;
 
 @MapperScan("com.example.demo.repository.mapper")
 @SpringBootApplication
 public class FkmDemoApplication {
 
 	public static void main(String[] args) {
+		TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
 		SpringApplication.run(FkmDemoApplication.class, args);
 
 

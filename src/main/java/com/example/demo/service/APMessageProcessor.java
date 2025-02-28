@@ -1,11 +1,12 @@
 package com.example.demo.service;
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONObject;
+
 import com.example.demo.config.RabbitMQConfig;
 import com.example.demo.entity.APLog;
 import com.example.demo.entity.APMessage;
 import com.example.demo.entity.PersonInfo;
 import com.example.demo.tool.RedisService;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.redisson.api.*;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -33,21 +34,15 @@ public class APMessageProcessor {
     private  final   ConcurrentHashMap<String, ConcurrentLinkedQueue<APMessage>> phoneMessageDictionary = new ConcurrentHashMap<>();
     // 保存人员出入井状态
     private    ConcurrentHashMap<String, Boolean> statusDictionary = new ConcurrentHashMap<>();
-    // 用于更新考勤
-    private    ConcurrentHashMap<String, Integer> attendanceDictionary = new ConcurrentHashMap<>();
     // 用于更新超时报警
     private    ConcurrentHashMap<String, Integer> overtimeDictionary = new ConcurrentHashMap<>();
     // 如果某人的定位数据超过1个小时，则自动删除定位数据
     private   final ConcurrentHashMap<String, ScheduledFuture<?>> OverTimeTimers = new ConcurrentHashMap<>();
     // 保存每个手机最后一次经过的AP
-    private   final ConcurrentHashMap<String, APMessage> phoneLastMessage = new ConcurrentHashMap<>();
+    private   final ConcurrentHashMap<String, PersonInfo> phoneLastMessage = new ConcurrentHashMap<>();
 
 
     //Local
-    // 保存一分钟的定位数据
-    private   final ConcurrentLinkedQueue<APMessage> m1Cache = new ConcurrentLinkedQueue<>();
-    // 由于有两个线程用消息队列，一个取一个添加，需要用线程安全的队列
-    private   final LinkedBlockingQueue<String> APMessageQueue = new LinkedBlockingQueue<>();
     // 保存所有的AP信息，键值为AP的名称（因为漫游数据通过名称来区别AP）
     private   final ConcurrentHashMap<String, APMessage> AllAPInformation = new ConcurrentHashMap<>();
     // 保存所有的用户信息，键值为MAC地址
@@ -62,8 +57,9 @@ public class APMessageProcessor {
     private RedissonClient redissonClient;
     @Autowired
     private RedisService redisService;
+
     @Autowired
-    private MessageProducer messageProducer;
+    private ObjectMapper objectMapper;
     //</editor-fold>
 
     @PostConstruct
@@ -72,17 +68,11 @@ public class APMessageProcessor {
 
         loadDataFromDatabase();
 
-//        ExecutorService executorRFService = Executors.newSingleThreadExecutor();//处理人员定位消息
-//        executorRFService.submit(() ->processAPMessage());
-//        executorRFService.shutdown();
 
+        ExecutorService handleDelayTask = Executors.newSingleThreadExecutor();//处理超时任务
+        handleDelayTask.submit(() ->delayTask());
+        handleDelayTask.shutdown();
 
-//        ExecutorService handleDelayTask = Executors.newSingleThreadExecutor();//处理超时任务
-//        handleDelayTask.submit(() ->delayTask());
-//        handleDelayTask.shutdown();
-//
-
-//
 //        ScheduledExecutorService syncCacheToRedis = Executors.newScheduledThreadPool(1);//定期转存Redis
 //        syncCacheToRedis.scheduleAtFixedRate(() ->migrateToRedis(), 0, 10, TimeUnit.SECONDS);
 
@@ -112,7 +102,6 @@ public class APMessageProcessor {
             for (PersonInfo item : personInfos) {
                 //第一次运行，redis没有对应缓存
                 statusDictionary.put(item.getMAC(), false); // 初始所有人员判定出井
-                attendanceDictionary.put(item.getMAC(), 0);
                 overtimeDictionary.put(item.getMAC(), 0);
                 migrateToRedis();
             }
@@ -130,13 +119,11 @@ public class APMessageProcessor {
 //        redisService.saveObjectToRedis("overtimeDictionary", overtimeDictionary);
 
 
-        // 迁移 statusDictionary
+         //迁移 statusDictionary
         RMap<String, Boolean> statusRedisMap = redissonClient.getMap("statusDictionary");
         statusRedisMap.putAll(statusDictionary);
 
-        // 迁移 attendanceDictionary
-        RMap<String, Integer> attendanceRedisMap = redissonClient.getMap("attendanceDictionary");
-        attendanceRedisMap.putAll(attendanceDictionary);
+
 
         // 迁移 overtimeDictionary
         RMap<String, Integer> overtimeRedisMap = redissonClient.getMap("overtimeDictionary");
@@ -149,11 +136,8 @@ public class APMessageProcessor {
         boolean status = false;
 
         boolean s1=checkIfRMapExists("phoneMessageDictionary");
-        boolean s2=checkIfRMapExists("statusDictionary");
-        boolean s3=checkIfRMapExists("attendanceDictionary");
-        boolean s4=checkIfRMapExists("overtimeDictionary");
 
-        status = s1&&s2&&s3&&s4;
+        status = s1;
         if (status) {
             ConcurrentHashMap<String, ConcurrentLinkedQueue<APMessage>> tmp_phoneMessageDictionary  =redisService.getPhoneMessageDictionary("phoneMessageDictionary");
             phoneMessageDictionary.clear();
@@ -165,8 +149,8 @@ public class APMessageProcessor {
             statusDictionary.putAll(statusRedisMap);
 
             // 获取 attendanceDictionary
-            RMap<String, Integer> attendanceRedisMap = redissonClient.getMap("attendanceDictionary");
-            attendanceDictionary.putAll(attendanceRedisMap);
+//            RMap<String, Integer> attendanceRedisMap = redissonClient.getMap("attendanceDictionary");
+//            attendanceDictionary.putAll(attendanceRedisMap);
 
             // 获取 overtimeDictionary
             RMap<String, Integer> overtimeRedisMap = redissonClient.getMap("overtimeDictionary");
@@ -181,29 +165,30 @@ public class APMessageProcessor {
     //<editor-fold desc="消费人员定位消息">
     @RabbitListener(queues = RabbitMQConfig.QUEUE_NAME)
     public void receiveMessage(String message) {
-        APMessage apMessage= JSONObject.parseObject(message,APMessage.class);
-        System.out.println("Received message: " + apMessage);
+
+        APMessage apMessage= null;
         try {
-            int randomNumber = ThreadLocalRandom.current().nextInt(1, 101);
-            Thread.sleep(randomNumber);
-            //cacheMessage(apMessage);
+            apMessage = objectMapper.readValue(message, APMessage.class);
+            System.out.println(apMessage.getGetTime().toString());
+
+            if (apMessage != null) {
+                cacheMessage(apMessage);
+            }
+            int randomNumber = ThreadLocalRandom.current().nextInt(1, 10);
+            Thread.sleep(1);
+
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
-        //
+//        System.out.println("Received message: " + apMessage);
+
 
     }
 
     // 将 AP 定位数据保存到内存中
     private  void cacheMessage(APMessage m) {
-
-
-//        phoneLastMessage.put(m.getPhoneMAC(),m);
-//        //redis更新
-//        /********************************************************************************************************/
-//        RMap<String, APMessage> phoneLastMessageRedisMap = redissonClient.getMap("phoneLastMessageDictionary");
-//        phoneLastMessageRedisMap.put(m.getPhoneMAC(),m);
-//        /********************************************************************************************************/
 
         phoneMessageDictionary.compute(m.getPhoneMAC(), (key, oldValue) -> {
             if (oldValue == null) {
@@ -222,12 +207,6 @@ public class APMessageProcessor {
                 return oldValue;
             }
 
-
-
-            //System.out.println(m.getAPName()+":"+m.getGetTime());
-            // System.out.println(count);
-
-
             // 存在此键值，此方法会被调用
             // 如果为空，则为出井状态
             boolean flag_empty = oldValue.isEmpty();
@@ -245,47 +224,26 @@ public class APMessageProcessor {
                     /**************************************************************************************************/
                 }
                 else  { // 判定出井
-                    String gonghao=m.getGongHao();
-                    // System.out.println(m.getPhoneMAC()+"出井"+": "+m.getGetTime());
-
-//                    try {
-//                        Thread.sleep(500);
-//                    } catch (InterruptedException e) {
-//                        throw new RuntimeException(e);
-//                    }
                     // 去数据库找该员工最新下井记录
                     // 更新出井时间和地点
                     statusDictionary.put(m.getPhoneMAC(), false);
-//                    /**************************************************************************************************/
-//                    //redis更新
-//                    RMap<String, Boolean> statusRedisMap = redissonClient.getMap("statusDictionary");
-//                    statusRedisMap.put(m.getPhoneMAC(), false);
-//                    /**************************************************************************************************/
-
-                    oldValue.add(m);
-
-
+                    /**************************************************************************************************/
+                    //redis更新
+                    RMap<String, Boolean> statusRedisMap = redissonClient.getMap("statusDictionary");
+                    statusRedisMap.put(m.getPhoneMAC(), false);
+                    /**************************************************************************************************/
                     // 更新考勤记录，补充出井信息
-                    int attendance_id = attendanceDictionary.getOrDefault(m.getPhoneMAC(), 0);
-                    if (attendance_id != 0) {
+                    dbo.updateAttendanceByGongHao(m.getGongHao(), m.getAPID(), m.getGetTime());
 
-                        dbo.updateAttendanceByGongHao(m.getGongHao(), m.getAPID(), m.getGetTime());
-                        attendanceDictionary.put(m.getPhoneMAC(), 0);
-//                        ///*********************************开始
-//                        //redis更新
-//                        RMap<String, Integer> attendanceRedisMap = redissonClient.getMap("attendanceDictionary");
-//                        attendanceRedisMap.put(m.getPhoneMAC(), 0);
-//                        ///************************************结束
-                    }
                     // 假如有超时记录，也要更新
                     int overtime_id = overtimeDictionary.getOrDefault(m.getPhoneMAC(), 0);
                     if (overtime_id != 0) {
                         dbo.updateAlarmInfoByGongHao(m.getGongHao(), m.getGetTime());
                         overtimeDictionary.put(m.getPhoneMAC(), 0);
-//                        ///*********************************开始
-//                        RMap<String, Integer> overtimeRedisMap = redissonClient.getMap("overtimeDictionary");
-//                        overtimeRedisMap.put(m.getPhoneMAC(), 0);
-//                        ///************************************结束
+                        ///*********************************开始
+                        RMap<String, Integer> overtimeRedisMap = redissonClient.getMap("overtimeDictionary");
+                        overtimeRedisMap.put(m.getPhoneMAC(), 0);
+                        ///************************************结束
 
                     }
 
@@ -308,42 +266,23 @@ public class APMessageProcessor {
             }
             else if (IsExitAPByTagID(m.getAPName())==0 && !flag_empty) { // 井下活动
                 if (!flag_IsIn) { // 判定入井并插入考勤记录
-                    //System.out.println(m.getPhoneMAC()+"入井"+": "+m.getGetTime());
-//                    try {
-//                        Thread.sleep(500);
-//                    } catch (InterruptedException e) {
-//                        throw new RuntimeException(e);
-//                    }
                     statusDictionary.put(m.getPhoneMAC(), true);
-//                    /**************************************************************************************************/
-//                    //redis更新
-//                    RMap<String, Boolean> statusRedisMap = redissonClient.getMap("statusDictionary");
-//                    statusRedisMap.put(m.getPhoneMAC(), true);
-//                    /**************************************************************************************************/
+                    /**************************************************************************************************/
+                    //redis更新
+                    RMap<String, Boolean> statusRedisMap = redissonClient.getMap("statusDictionary");
+                    statusRedisMap.put(m.getPhoneMAC(), true);
+                    /**************************************************************************************************/
                     // 记录考勤
 
                     //bug********************************************************************************************************
-                    String jsonObject= JSON.toJSONString(oldValue.peek());
+                    //String jsonObject= JSON.toJSONString(oldValue.peek());
                     //将json转成需要的对象
                     APMessage inAPMessage = (APMessage) oldValue.peek();
                     //APMessage inAPMessage= JSONObject.parseObject(jsonObject,APMessage.class);
                     //************************************************************************************************************
 
-
-                    // 如果该班次还没有下井记录则插入一条下井记录，否则将下井记录的出井时间和地点重新置为空
-                    // 1.从数据库查找该员工的最新下井记录，
-                    // 如果不为当班次则插入一条新下井记录，否则将下井记录的出井时间和地点重新置为空
-                    // 不再需要返回的 id 了
                     int id = dbo.insertAttendanceInfo(m.getGongHao(),inAPMessage.getGetTime(), inAPMessage.getAPID());
 
-                    attendanceDictionary.put(m.getPhoneMAC(), id);
-
-
-//                    ///*********************************开始
-//                    //redis更新
-//                    RMap<String, Integer> attendanceRedisMap = redissonClient.getMap("attendanceDictionary");
-//                    attendanceRedisMap.put(m.getPhoneMAC(), id);
-//                    ///************************************结束
                     oldValue.add(m);
                     ///*********************************开始
                     redisService.updateQueueInRedis("phoneMessageDictionary", key, oldValue);
@@ -356,12 +295,12 @@ public class APMessageProcessor {
                     RBlockingQueue<String> queue = redissonClient.getBlockingQueue("delayQueue");
                     RDelayedQueue<String> delayedQueue = redissonClient.getDelayedQueue(queue);// 获取一个延时队列，将普通队列包装成延时队列
                     String task = m.getGongHao();
-                    delayedQueue.offer(task, 10, TimeUnit.SECONDS);
+                    delayedQueue.offer(task, 8, TimeUnit.HOURS);
                     ///************************************结束
 
                 }
                 else { // 井下活动
-                    System.out.println(m.getPhoneMAC()+"在井下活动"+": "+m.getGetTime());
+                    //System.out.println(m.getPhoneMAC()+"在井下活动"+": "+m.getGetTime());
                     oldValue.add(m);
                     ///*********************************开始
                     redisService.updateQueueInRedis("phoneMessageDictionary", key, oldValue);
@@ -372,8 +311,7 @@ public class APMessageProcessor {
             return oldValue;
         });
 
-        //System.out.println(count);
-        m1Cache.add(m);
+
 
     }
     //</editor-fold>
@@ -427,10 +365,10 @@ public class APMessageProcessor {
         overtime_id = dbo.insertAlarmInfo(type_id, gonghao, begin_time, is_confirm, alarm_color, is_vanish, alarm_value);
         // 将超时记录的 ID 存入 overtimeDictionary
         overtimeDictionary.put(phoneMAC, overtime_id);
-//        ///*********************************开始
-//        RMap<String, Integer> overtimeRedisMap = redissonClient.getMap("overtimeDictionary");
-//        overtimeRedisMap.put(phoneMAC, overtime_id);
-//        ///************************************结束
+        ///*********************************开始
+        RMap<String, Integer> overtimeRedisMap = redissonClient.getMap("overtimeDictionary");
+        overtimeRedisMap.put(phoneMAC, overtime_id);
+        ///************************************结束
         return true;
     }
     //</editor-fold>
