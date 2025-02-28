@@ -1,5 +1,7 @@
 package com.example.demo.service;
 
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONObject;
 import com.example.demo.config.RabbitMQConfig;
 import com.example.demo.entity.APLog;
 import com.example.demo.entity.APMessage;
@@ -9,6 +11,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.redisson.api.*;
+import org.redisson.client.codec.Codec;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,6 +25,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.net.Socket;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -77,6 +81,7 @@ public class APMessageProcessor {
 //        syncCacheToRedis.scheduleAtFixedRate(() ->migrateToRedis(), 0, 10, TimeUnit.SECONDS);
 
         System.out.println("初始化完成");
+
     }
 
     //<editor-fold desc="数据迁移">
@@ -103,6 +108,7 @@ public class APMessageProcessor {
                 //第一次运行，redis没有对应缓存
                 statusDictionary.put(item.getMAC(), false); // 初始所有人员判定出井
                 overtimeDictionary.put(item.getMAC(), 0);
+
                 migrateToRedis();
             }
         }
@@ -128,6 +134,9 @@ public class APMessageProcessor {
         // 迁移 overtimeDictionary
         RMap<String, Integer> overtimeRedisMap = redissonClient.getMap("overtimeDictionary");
         overtimeRedisMap.putAll(overtimeDictionary);
+
+        RBlockingQueue<String> queue = redissonClient.getBlockingQueue("delayQueue");
+        RDelayedQueue<String> delayedQueue = redissonClient.getDelayedQueue(queue);// 获取一个延时队列，将
     }
 
     // 从 Redis 中获取数据
@@ -167,21 +176,16 @@ public class APMessageProcessor {
     public void receiveMessage(String message) {
 
         APMessage apMessage= null;
-        try {
-            apMessage = objectMapper.readValue(message, APMessage.class);
-            System.out.println(apMessage.getGetTime().toString());
 
-            if (apMessage != null) {
-                cacheMessage(apMessage);
-            }
-            int randomNumber = ThreadLocalRandom.current().nextInt(1, 10);
-            Thread.sleep(1);
+        apMessage = JSONObject.parseObject(message,APMessage.class);
+        System.out.println(apMessage.getGetTime().toString());
 
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException(e);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+        if (apMessage != null) {
+            cacheMessage(apMessage);
         }
+        int randomNumber = ThreadLocalRandom.current().nextInt(1, 10);
+
+
 //        System.out.println("Received message: " + apMessage);
 
 
@@ -275,10 +279,10 @@ public class APMessageProcessor {
                     // 记录考勤
 
                     //bug********************************************************************************************************
-                    //String jsonObject= JSON.toJSONString(oldValue.peek());
+                    String jsonObject= JSON.toJSONString(oldValue.peek());
                     //将json转成需要的对象
-                    APMessage inAPMessage = (APMessage) oldValue.peek();
-                    //APMessage inAPMessage= JSONObject.parseObject(jsonObject,APMessage.class);
+                    //APMessage inAPMessage = (APMessage) oldValue.peek();
+                    APMessage inAPMessage= JSONObject.parseObject(jsonObject,APMessage.class);
                     //************************************************************************************************************
 
                     int id = dbo.insertAttendanceInfo(m.getGongHao(),inAPMessage.getGetTime(), inAPMessage.getAPID());
@@ -293,9 +297,11 @@ public class APMessageProcessor {
 //                    OverTimeTimers.put(m.getPhoneMAC(), future);
                     ///*********************************开始
                     RBlockingQueue<String> queue = redissonClient.getBlockingQueue("delayQueue");
-                    RDelayedQueue<String> delayedQueue = redissonClient.getDelayedQueue(queue);// 获取一个延时队列，将普通队列包装成延时队列
-                    String task = m.getGongHao();
-                    delayedQueue.offer(task, 8, TimeUnit.HOURS);
+                    RDelayedQueue<String> delayedQueue = redissonClient.getDelayedQueue(queue);// 获取一个延时队列，将
+                    String task = m.getPhoneMAC();
+                    int randomNumber = ThreadLocalRandom.current().nextInt(20, 100);
+
+                    delayedQueue.offer(task, randomNumber, TimeUnit.SECONDS);
                     ///************************************结束
 
                 }
@@ -319,22 +325,23 @@ public class APMessageProcessor {
     //<editor-fold desc="处理超时任务">
     private  void delayTask()  {
 
+        System.out.println("开始执行超时任务：");
         long flag= redissonClient.getKeys().countExists("delayQueue");
-        if (flag>0) {
-            // 获取一个普通队列
+        while (true) {
             RBlockingQueue<String> queue = redissonClient.getBlockingQueue("delayQueue");
-            // 获取一个延时队列，将普通队列包装成延时队列
-            RDelayedQueue<String> delayedQueue = redissonClient.getDelayedQueue(queue);
+
             // 从普通队列中获取任务，如果队列为空则阻塞
             String queueTask = "";
             try {
+                System.out.println("人员超时："+queueTask);
                 queueTask = queue.take();
+
                 recordOverTimeData(queueTask);
             } catch (InterruptedException e) {
                 throw new RuntimeException(e);
             }
-
         }
+
 
     }
 
@@ -362,6 +369,7 @@ public class APMessageProcessor {
 
         int overtime_id = -1;
         // 插入报警信息到数据库
+        System.out.println(phoneMAC+"  "+gonghao);
         overtime_id = dbo.insertAlarmInfo(type_id, gonghao, begin_time, is_confirm, alarm_color, is_vanish, alarm_value);
         // 将超时记录的 ID 存入 overtimeDictionary
         overtimeDictionary.put(phoneMAC, overtime_id);
